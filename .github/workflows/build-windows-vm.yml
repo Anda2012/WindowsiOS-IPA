@@ -1,0 +1,120 @@
+
+name: Build Windows 11 ARM64 VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show runner resources
+        run: |
+          echo "=== Disk ==="
+          df -h /
+          echo "=== Memory ==="
+          sysctl hw.memsize
+
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install qemu wimlib pkg-config libslirp llvm meson ninja
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+
+      - name: Download LLVM-MinGW
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request
+          url = "https://api.github.com/repos/mstorsjo/llvm-mingw/releases/latest"
+          req = urllib.request.Request(url, headers={"User-Agent": "GitHub-Actions"})
+          data = json.load(urllib.request.urlopen(req))
+          assets = data["assets"]
+          asset = next(
+              a for a in assets
+              if "macos-universal" in a["name"] and a["name"].endswith(".tar.xz")
+          )
+          print(asset["browser_download_url"])
+          urllib.request.urlretrieve(asset["browser_download_url"], "llvm-mingw.tar.xz")
+          PY
+          mkdir llvm-mingw
+          tar -xf llvm-mingw.tar.xz -C llvm-mingw --strip-components=1
+          echo "$PWD/llvm-mingw/bin" >> "$GITHUB_PATH"
+
+      - name: Prepare Windows optimizer
+        run: |
+          mkdir -p build work/downloads
+          aarch64-w64-mingw32-clang \
+            -O2 -static \
+            tools/opt_hive_arm64.c \
+            -ladvapi32 \
+            -o build/opt_hive_arm64.exe
+
+      - name: Download Windows 11 ARM64 ESD
+        env:
+          ESD_URL: ${{ secrets.WINDOWS_ESD_URL }}
+        run: |
+          if [ -z "$ESD_URL" ]; then
+            echo "Missing WINDOWS_ESD_URL repository secret."
+            exit 1
+          fi
+          curl -L --fail --retry 3 \
+            "$ESD_URL" \
+            -o work/downloads/Win11_24H2_ARM64_en-us.esd
+
+      - name: Build VM engine
+        run: |
+          make -j2 all
+          ./build/hvsparse --help || true
+
+      - name: Provision Windows
+        run: |
+          /opt/homebrew/bin/python3 scripts/provision_windows_arm64.py
+
+      - name: Optimize Windows
+        run: |
+          /opt/homebrew/bin/python3 scripts/optimize_windows_lite.py
+
+      - name: Pack VM image
+        run: |
+          ./build/hvsparse pack \
+            work/windows11_lite.img \
+            work/windows11.hvsparse
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          cp work/code.fd release-assets/
+          cp work/vars_clean.fd release-assets/vars.fd
+
+          split -b 1800m \
+            work/windows11.hvsparse \
+            release-assets/windows11.hvsparse.part-
+
+          cat > release-assets/REASSEMBLE.txt <<'EOF'
+          Join all windows11.hvsparse.part-* files in alphabetical order:
+          cat windows11.hvsparse.part-* > windows11.hvsparse
+          EOF
+
+          df -h /
+          du -sh release-assets
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: Windows VM ${{ inputs.version }}
+          generate_release_notes: true
+          files: release-assets/*
