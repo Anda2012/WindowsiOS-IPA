@@ -53,11 +53,13 @@ jobs:
           tar -xf llvm-mingw.tar.xz -C llvm-mingw --strip-components=1
           echo "$PWD/llvm-mingw/bin" >> "$GITHUB_PATH"
 
+      
       - name: Prepare Windows optimizer
         run: |
-          mkdir -p build work/downloads
+          mkdir -p build
           aarch64-w64-mingw32-clang \
-            -O2 -static \
+            -O2 -static -nostartfiles \
+            -Wl,-e,mainCRTStartup \
             tools/opt_hive_arm64.c \
             -ladvapi32 \
             -o build/opt_hive_arm64.exe
