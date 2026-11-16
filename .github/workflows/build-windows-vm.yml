@@ -92,25 +92,24 @@ jobs:
         run: |
           set -euo pipefail
 
-          UUP_ID="bffcd6fc-442f-4c20-b144-501f0bf5dc11"
+          UUP_ID="68ea9468-877e-4113-9f76-eebdb7604a81"
 
           mkdir -p uup-download/UUPs
 
-          echo "Selected Windows 11 24H2 ARM64 build."
+          echo "Selected Windows 11 24H2 ARM64 Retail build."
           echo "UUP ID: $UUP_ID"
 
-          # Request an aria2 download list.
-          # This is a text file, NOT a ZIP archive.
           curl -fL \
             --retry 3 \
             --retry-delay 5 \
             --connect-timeout 30 \
             -A "Mozilla/5.0" \
-            "https://uupdump.net/get.php?id=${UUP_ID}&lang=en-us&edition=professional&aria2=2" \
+            "https://uupdump.net/get.php?id=${UUP_ID}&pack=en-us&edition=professional&aria2=2" \
             -o uup-download/uup-files.txt
 
           if ! grep -qE '^https?://' uup-download/uup-files.txt; then
             echo "::error::UUP Dump did not return an aria2 download list."
+            echo "UUP Dump response:"
             head -c 2000 uup-download/uup-files.txt
             exit 1
           fi
@@ -244,7 +243,6 @@ jobs:
 
           rm -f "$ESD_OUT"
 
-          # Index 1: Windows setup files.
           rsync -a \
             --exclude="/sources/install.esd" \
             --exclude="/sources/install.wim" \
@@ -258,7 +256,6 @@ jobs:
             "Windows Setup Files" \
             --compress=LZX
 
-          # Index 2: Windows PE setup image.
           wimlib-imagex export \
             "$ISO_MOUNT/sources/boot.wim" \
             2 \
@@ -267,7 +264,6 @@ jobs:
             --compress=LZX \
             --boot
 
-          # Index 3: Windows 11 Professional.
           wimlib-imagex export \
             "$INSTALL_IMAGE" \
             "$PRO_INDEX" \
