@@ -32,28 +32,41 @@ jobs:
         run: |
           brew update
           brew install qemu wimlib pkg-config libslirp llvm meson ninja
+          brew install aria2 cabextract cdrtools
+          brew tap minacle/chntpw
+          brew install minacle/chntpw/chntpw
           echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
 
       - name: Download LLVM-MinGW
         run: |
           python3 - <<'PY'
-          import json, urllib.request
+          import json
+          import urllib.request
+
           url = "https://api.github.com/repos/mstorsjo/llvm-mingw/releases/latest"
-          req = urllib.request.Request(url, headers={"User-Agent": "GitHub-Actions"})
-          data = json.load(urllib.request.urlopen(req))
-          assets = data["assets"]
-          asset = next(
-              a for a in assets
-              if "macos-universal" in a["name"] and a["name"].endswith(".tar.xz")
+          req = urllib.request.Request(
+              url,
+              headers={"User-Agent": "GitHub-Actions"}
           )
-          print(asset["browser_download_url"])
-          urllib.request.urlretrieve(asset["browser_download_url"], "llvm-mingw.tar.xz")
+          data = json.load(urllib.request.urlopen(req))
+
+          asset = next(
+              a for a in data["assets"]
+              if "macos-universal" in a["name"]
+              and a["name"].endswith(".tar.xz")
+          )
+
+          print("Downloading:", asset["name"])
+          urllib.request.urlretrieve(
+              asset["browser_download_url"],
+              "llvm-mingw.tar.xz"
+          )
           PY
+
           mkdir llvm-mingw
           tar -xf llvm-mingw.tar.xz -C llvm-mingw --strip-components=1
           echo "$PWD/llvm-mingw/bin" >> "$GITHUB_PATH"
 
-      
       - name: Prepare Windows optimizer
         run: |
           mkdir -p build
@@ -64,17 +77,101 @@ jobs:
             -ladvapi32 \
             -o build/opt_hive_arm64.exe
 
-      - name: Download Windows 11 ARM64 ESD
-        env:
-          ESD_URL: ${{ secrets.WINDOWS_ESD_URL }}
+      - name: Download and convert Windows 11 ARM64
+        shell: bash
         run: |
-          if [ -z "$ESD_URL" ]; then
-            echo "Missing WINDOWS_ESD_URL repository secret."
+          set -euo pipefail
+
+          UUP_ID="11a79ad8-a26e-4deb-964e-f65231c110be"
+          UUP_DIR="$PWD/uup-download"
+          ISO_MOUNT="$PWD/work/iso"
+          ISO_STAGE="$PWD/work/iso-stage"
+          ESD_OUT="$PWD/work/downloads/Win11_24H2_ARM64_en-us.esd"
+
+          mkdir -p "$UUP_DIR" work/downloads work
+
+          echo "Downloading Windows 11 24H2 ARM64 Pro UUP package..."
+
+          curl -fL --retry 3 \
+            "https://uupdump.net/get.php?id=${UUP_ID}&pack=en-us&edition=professional&aria2=2" \
+            -o uup-download.zip
+
+          unzip -q uup-download.zip -d "$UUP_DIR"
+
+          echo "Running UUP download and conversion..."
+
+          cd "$UUP_DIR"
+          chmod +x uup_download_macos.sh
+          bash ./uup_download_macos.sh
+          cd "$GITHUB_WORKSPACE"
+
+          ISO="$(find "$UUP_DIR" -type f -iname '*.iso' -print -quit)"
+
+          if [ -z "$ISO" ]; then
+            echo "ERROR: UUP converter did not produce an ISO."
             exit 1
           fi
-          curl -L --fail --retry 3 \
-            "$ESD_URL" \
-            -o work/downloads/Win11_24H2_ARM64_en-us.esd
+
+          echo "Found ISO: $ISO"
+
+          mkdir -p "$ISO_MOUNT" "$ISO_STAGE"
+
+          hdiutil attach \
+            -readonly \
+            -nobrowse \
+            -mountpoint "$ISO_MOUNT" \
+            "$ISO"
+
+          trap 'hdiutil detach "$ISO_MOUNT" -quiet || true' EXIT
+
+          echo "Creating combined ESD..."
+
+          rsync -a \
+            --exclude="/sources/install.esd" \
+            --exclude="/sources/boot.wim" \
+            "$ISO_MOUNT/" \
+            "$ISO_STAGE/"
+
+          # Index 1: Windows setup files
+          wimlib-imagex capture \
+            "$ISO_STAGE" \
+            "$ESD_OUT" \
+            "Windows Setup Files" \
+            --compress=LZX
+
+          # Index 2: Windows PE setup image
+          wimlib-imagex export \
+            "$ISO_MOUNT/sources/boot.wim" \
+            2 \
+            "$ESD_OUT" \
+            "Windows Setup PE" \
+            --compress=LZX \
+            --boot
+
+          # Indexes 3-6: Windows 11 Pro image.
+          # Index 6 is retained because the existing provisioner expects it.
+          for INDEX in 3 4 5 6; do
+            echo "Adding Windows Pro image as index $INDEX..."
+
+            wimlib-imagex export \
+              "$ISO_MOUNT/sources/install.esd" \
+              1 \
+              "$ESD_OUT" \
+              "Windows 11 Pro" \
+              --compress=LZX
+          done
+
+          echo "Checking combined ESD..."
+          wimlib-imagex info "$ESD_OUT"
+
+          hdiutil detach "$ISO_MOUNT" -quiet
+          trap - EXIT
+
+          echo "Removing temporary UUP and ISO files..."
+          rm -rf "$UUP_DIR" uup-download.zip "$ISO" "$ISO_STAGE"
+
+          echo "Final ESD:"
+          ls -lh "$ESD_OUT"
 
       - name: Build VM engine
         run: |
@@ -98,6 +195,7 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
+
           cp work/code.fd release-assets/
           cp work/vars_clean.fd release-assets/vars.fd
 
@@ -107,6 +205,7 @@ jobs:
 
           cat > release-assets/REASSEMBLE.txt <<'EOF'
           Join all windows11.hvsparse.part-* files in alphabetical order:
+
           cat windows11.hvsparse.part-* > windows11.hvsparse
           EOF
 
