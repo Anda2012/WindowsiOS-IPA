@@ -1,72 +1,142 @@
 
-name: Build unsigned iOS IPA
+name: Build and Release WindowsiOS IPA
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (without v, e.g. 1.0.0)"
+        required: true
+        default: "1.0.0"
+        type: string
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: windowsios-ipa-release
+  cancel-in-progress: false
 
 jobs:
   build:
-    runs-on: macos-15
+    name: Build unsigned IPA
+    runs-on: xcode-27
+    timeout-minutes: 180
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode
+      - name: Set up Xcode 27
         run: |
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
 
       - name: Install dependencies
         run: |
-          brew install xcodegen meson ninja pkg-config python@3.12
+          brew install \
+            xcodegen \
+            meson \
+            ninja \
+            pkg-config \
+            autoconf \
+            automake \
+            libtool \
+            gettext \
+            python
+
+      - name: Fetch Husk build patches
+        run: |
+          git clone --depth 1 \
+            https://github.com/Leviidev/Husk.git \
+            "$RUNNER_TEMP/Husk"
+
+          test -f "$RUNNER_TEMP/Husk/patches/libslirp-v4.9.1.patch"
 
       - name: Build iOS dependencies
+        env:
+          HUSK_REF: ${{ runner.temp }}/Husk
         run: |
           ./scripts/build_ios_deps.sh
 
       - name: Build native iOS library
         run: |
-          make -j8 ios-lib
+          make -j"$(sysctl -n hw.ncpu)" ios-lib
 
       - name: Generate Xcode project
         run: |
-          xcodegen generate --spec ios/project.yml
+          cd ios
+          xcodegen generate --spec project.yml
 
-      - name: Build unsigned iOS app
+      - name: Build unsigned iOS application
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
+          set -o pipefail
+
+          VERSION="${VERSION#v}"
+
+          mkdir -p build
+
           xcodebuild \
             -project ios/WindowsiOS.xcodeproj \
             -scheme WindowsiOS \
             -configuration Release \
             -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             -derivedDataPath build/DerivedData \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            build 2>&1 | tee build/xcodebuild.log
 
-      - name: Package IPA
+      - name: Package unsigned IPA
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
+          VERSION="${VERSION#v}"
+
           APP="build/DerivedData/Build/Products/Release-iphoneos/WindowsiOS.app"
 
           test -d "$APP"
 
-          mkdir -p "$RUNNER_TEMP/ipa/Payload"
-          ditto "$APP" "$RUNNER_TEMP/ipa/Payload/WindowsiOS.app"
+          mkdir -p build/ipa/Payload
 
-          cd "$RUNNER_TEMP/ipa"
-          zip -qry "$GITHUB_WORKSPACE/WindowsiOS-unsigned.ipa" Payload
+          ditto "$APP" build/ipa/Payload/WindowsiOS.app
 
-      - name: Upload unsigned IPA
+          cd build/ipa
+
+          zip -qry \
+            "$GITHUB_WORKSPACE/WindowsiOS-${VERSION}-unsigned.ipa" \
+            Payload
+
+          cd "$GITHUB_WORKSPACE"
+
+          shasum -a 256 "WindowsiOS-${VERSION}-unsigned.ipa"
+
+      - name: Upload build logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: WindowsiOS-unsigned-IPA
-          path: WindowsiOS-unsigned.ipa
-          if-no-files-found: error
-          retention-days: 14
+          name: WindowsiOS-Build-Logs
+          path: |
+            build/xcodebuild.log
+            work/ios_deps_build/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: WindowsiOS v${{ inputs.version }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: WindowsiOS-${{ inputs.version }}-unsigned.ipa
+          fail_on_unmatched_files: true
+          make_latest: true
