@@ -92,161 +92,33 @@ jobs:
         run: |
           set -euo pipefail
 
+          UUP_ID="bffcd6fc-442f-4c20-b144-501f0bf5dc11"
+
           mkdir -p uup-download/UUPs
 
-          # Find the newest Windows 11 24H2 ARM64 build.
-          python3 - <<'PY'
-          import json
-          import re
-          import urllib.request
-          import urllib.parse
+          echo "Selected Windows 11 24H2 ARM64 build."
+          echo "UUP ID: $UUP_ID"
 
-          BASE = "https://api.uupdump.net/"
-
-          def get_json(url):
-              req = urllib.request.Request(
-                  url,
-                  headers={"User-Agent": "Windows-VM-GitHub-Actions"}
-              )
-              with urllib.request.urlopen(req, timeout=90) as response:
-                  return json.load(response)
-
-          query = urllib.parse.urlencode({
-              "search": "26100",
-              "sortByDate": "1"
-          })
-
-          data = get_json(BASE + "listid.php?" + query)
-          response = data.get("response", {})
-
-          if not isinstance(response, dict):
-              raise SystemExit("Invalid UUP Dump API response.")
-
-          if response.get("error"):
-              raise SystemExit(str(response["error"]))
-
-          builds = response.get("builds", [])
-
-          if isinstance(builds, dict):
-              builds = list(builds.values())
-
-          if not isinstance(builds, list):
-              raise SystemExit("Unexpected UUP Dump builds format.")
-
-          candidates = []
-
-          for item in builds:
-              if isinstance(item, dict):
-                  title = str(item.get("title", ""))
-                  build = str(item.get("build", ""))
-                  arch = str(item.get("arch", ""))
-                  uuid = str(item.get("uuid", ""))
-                  created = int(item.get("created") or 0)
-
-              elif isinstance(item, str):
-                  # Some responses contain UUID strings instead of objects.
-                  if not re.fullmatch(r"[0-9a-fA-F-]{36}", item):
-                      continue
-
-                  info_url = BASE + "updateinfo.php?" + urllib.parse.urlencode({
-                      "id": item
-                  })
-
-                  try:
-                      info = get_json(info_url).get("response", {})
-                  except Exception as exc:
-                      print("Skipping", item, ":", exc)
-                      continue
-
-                  if not isinstance(info, dict):
-                      continue
-
-                  title = str(
-                      info.get("title")
-                      or info.get("updateTitle")
-                      or info.get("updateName")
-                      or ""
-                  )
-
-                  build = str(
-                      info.get("build")
-                      or info.get("foundBuild")
-                      or ""
-                  )
-
-                  arch = str(info.get("arch", ""))
-                  uuid = item
-                  created = int(info.get("created") or 0)
-
-              else:
-                  continue
-
-              if (
-                  uuid
-                  and arch.lower() in ("arm64", "aarch64")
-                  and build.startswith("26100.")
-                  and "windows 11" in title.lower()
-              ):
-                  candidates.append({
-                      "title": title,
-                      "build": build,
-                      "arch": arch,
-                      "uuid": uuid,
-                      "created": created
-                  })
-
-          if not candidates:
-              raise SystemExit(
-                  "No Windows 11 26100 ARM64 builds found. "
-                  "API returned "
-                  + str(len(builds))
-                  + " entries."
-              )
-
-          candidates.sort(
-              key=lambda x: (
-                  tuple(int(p) for p in x["build"].split(".")),
-                  x["created"]
-              ),
-              reverse=True
-          )
-
-          selected = candidates[0]
-
-          print("Selected Windows build:")
-          print("Title:", selected["title"])
-          print("Build:", selected["build"])
-          print("Architecture:", selected["arch"])
-          print("Update ID:", selected["uuid"])
-
-          with open("uup-id.txt", "w") as f:
-              f.write(selected["uuid"])
-          PY
-
-          UUP_ID="$(cat uup-id.txt)"
-
-          echo "Requesting UUP download list for $UUP_ID..."
-
+          # Request an aria2 download list.
+          # This is a text file, NOT a ZIP archive.
           curl -fL \
             --retry 3 \
             --retry-delay 5 \
+            --connect-timeout 30 \
             -A "Mozilla/5.0" \
-            "https://uupdump.net/get.php?id=${UUP_ID}&pack=en-us&edition=professional&aria2=2" \
+            "https://uupdump.net/get.php?id=${UUP_ID}&lang=en-us&edition=professional&aria2=2" \
             -o uup-download/uup-files.txt
 
           if ! grep -qE '^https?://' uup-download/uup-files.txt; then
-            echo "::error::UUP Dump did not return a valid aria2 download list."
+            echo "::error::UUP Dump did not return an aria2 download list."
             head -c 2000 uup-download/uup-files.txt
             exit 1
           fi
 
-          if grep -q '#UUPDUMP_ERROR:' uup-download/uup-files.txt; then
-            echo "::error::UUP Dump reported an error."
-            cat uup-download/uup-files.txt
-            exit 1
-          fi
+          echo "Download list received:"
+          head -20 uup-download/uup-files.txt
 
-          echo "Downloading Windows files using aria2..."
+          echo "Downloading Windows UUP files..."
 
           aria2c \
             --no-conf \
@@ -255,14 +127,14 @@ jobs:
             --max-tries=5 \
             --retry-wait=10 \
             --connect-timeout=30 \
-            -x16 -s16 -j5 \
+            -x8 \
+            -s8 \
+            -j4 \
             -c \
             -d "$PWD/uup-download/UUPs" \
             -i "$PWD/uup-download/uup-files.txt"
 
-          echo "UUP downloads completed."
-
-          find uup-download/UUPs -type f | head -40
+          echo "UUP download completed."
           du -sh uup-download/UUPs
 
       - name: Convert UUP files to Windows ISO
@@ -281,19 +153,17 @@ jobs:
 
           chmod +x "$CONVERTER/convert.sh"
 
-          echo "Starting Windows ESD conversion..."
+          echo "Converting UUP files..."
 
           cd "$CONVERTER"
           ./convert.sh esd "$UUPS"
           cd "$GITHUB_WORKSPACE"
 
-          echo "Searching for generated ISO..."
-
           ISO="$(find "$CONVERTER" "$UUPS" \
             -type f -iname '*.iso' -print -quit)"
 
           if [ -z "$ISO" ]; then
-            echo "::error::The UUP converter did not produce an ISO."
+            echo "::error::UUP converter did not produce an ISO."
             find "$CONVERTER" "$UUPS" -maxdepth 4 -type f
             exit 1
           fi
@@ -336,16 +206,14 @@ jobs:
             exit 1
           fi
 
-          echo "Checking Windows installation editions..."
+          echo "Checking Windows editions..."
 
           wimlib-imagex info "$INSTALL_IMAGE" --xml > install-info.xml
 
-          # Find the real Professional image index.
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
 
           root = ET.parse("install-info.xml").getroot()
-
           selected = None
 
           for image in root.findall("IMAGE"):
@@ -357,18 +225,16 @@ jobs:
 
               edition = windows.findtext("EDITIONID", default="")
 
-              print("Image index:", index, "| Edition:", edition)
+              print("Index:", index, "Edition:", edition)
 
               if edition.strip().lower() == "professional":
                   selected = index
                   break
 
           if selected is None:
-              raise SystemExit(
-                  "Windows Professional edition was not found in install image."
-              )
+              raise SystemExit("Windows Professional edition not found.")
 
-          print("Selected Professional index:", selected)
+          print("Professional edition index:", selected)
 
           with open("pro-index.txt", "w") as f:
               f.write(selected)
@@ -376,14 +242,9 @@ jobs:
 
           PRO_INDEX="$(cat pro-index.txt)"
 
-          echo "Windows Pro source index: $PRO_INDEX"
-
-          # Check that boot.wim has the expected Windows Setup index.
-          wimlib-imagex info "$ISO_MOUNT/sources/boot.wim"
-
           rm -f "$ESD_OUT"
 
-          # Index 1: Windows setup boot files.
+          # Index 1: Windows setup files.
           rsync -a \
             --exclude="/sources/install.esd" \
             --exclude="/sources/install.wim" \
@@ -406,7 +267,7 @@ jobs:
             --compress=LZX \
             --boot
 
-          # Index 3: Actual Windows 11 Professional image.
+          # Index 3: Windows 11 Professional.
           wimlib-imagex export \
             "$INSTALL_IMAGE" \
             "$PRO_INDEX" \
@@ -414,13 +275,13 @@ jobs:
             "Windows 11 Pro" \
             --compress=LZX
 
-          echo "Final combined ESD information:"
+          echo "Checking generated ESD:"
           wimlib-imagex info "$ESD_OUT"
 
           hdiutil detach "$ISO_MOUNT" -quiet
           trap - EXIT
 
-          echo "ESD successfully assembled:"
+          echo "ESD generated:"
           ls -lh "$ESD_OUT"
 
       - name: Align provisioning script with ESD indexes
@@ -439,15 +300,12 @@ jobs:
 
           if old not in content:
               raise SystemExit(
-                  "Could not find the expected Windows Pro export command "
-                  "in provision_windows_arm64.py. "
-                  "The file may have changed."
+                  "Could not find the expected Windows Pro export command."
               )
 
-          content = content.replace(old, new, 1)
-          path.write_text(content)
+          path.write_text(content.replace(old, new, 1))
 
-          print("Provisioner now exports Windows Pro from ESD index 3.")
+          print("Provisioner updated to use ESD index 3.")
           PY
 
       - name: Build VM engine
