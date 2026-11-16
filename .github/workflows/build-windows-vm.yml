@@ -48,13 +48,22 @@ jobs:
               url,
               headers={"User-Agent": "GitHub-Actions"}
           )
-          data = json.load(urllib.request.urlopen(req))
 
+          with urllib.request.urlopen(req) as response:
+              data = json.load(response)
+
+          assets = data.get("assets", [])
           asset = next(
-              a for a in data["assets"]
-              if "macos-universal" in a["name"]
-              and a["name"].endswith(".tar.xz")
+              (
+                  a for a in assets
+                  if "macos-universal" in a["name"]
+                  and a["name"].endswith(".tar.xz")
+              ),
+              None
           )
+
+          if asset is None:
+              raise SystemExit("Could not find the macOS LLVM-MinGW release.")
 
           print("Downloading:", asset["name"])
           urllib.request.urlretrieve(
@@ -70,6 +79,7 @@ jobs:
       - name: Prepare Windows optimizer
         run: |
           mkdir -p build
+
           aarch64-w64-mingw32-clang \
             -O2 -static -nostartfiles \
             -Wl,-e,mainCRTStartup \
@@ -77,7 +87,6 @@ jobs:
             -ladvapi32 \
             -o build/opt_hive_arm64.exe
 
-      
       - name: Download and convert Windows 11 ARM64
         shell: bash
         run: |
@@ -90,76 +99,161 @@ jobs:
 
           mkdir -p "$UUP_DIR" work/downloads work
 
-          # Find the newest Windows 11 24H2 ARM64 build.
+          # Find a Windows 11 24H2 ARM64 build.
           python3 - <<'PY'
           import json
+          import re
           import urllib.request
+          import urllib.parse
 
-          url = "https://api.uupdump.net/listid.php?search=26100&sortByDate=1"
-          req = urllib.request.Request(
-              url,
-              headers={"User-Agent": "Windows-VM-GitHub-Actions"}
-          )
+          BASE = "https://api.uupdump.net/"
 
-          with urllib.request.urlopen(req, timeout=60) as response:
-              data = json.load(response)
+          def get_json(url):
+              request = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "Windows-VM-GitHub-Actions"}
+              )
+              with urllib.request.urlopen(request, timeout=90) as response:
+                  return json.load(response)
 
-          builds = data.get("response", {}).get("builds", [])
+          url = BASE + "listid.php?" + urllib.parse.urlencode({
+              "search": "26100",
+              "sortByDate": "1"
+          })
+
+          data = get_json(url)
+          result = data.get("response", {})
+
+          if not isinstance(result, dict):
+              raise SystemExit("UUP Dump returned an invalid response.")
+
+          if result.get("error"):
+              raise SystemExit("UUP Dump error: " + str(result["error"]))
+
+          builds = result.get("builds", [])
+
+          # Some API responses may expose builds as a dictionary.
+          if isinstance(builds, dict):
+              builds = list(builds.values())
+
+          if not isinstance(builds, list):
+              raise SystemExit(
+                  "Unexpected UUP Dump builds format: "
+                  + type(builds).__name__
+              )
 
           candidates = []
+
           for item in builds:
-              title = item.get("title", "").lower()
-              arch = item.get("arch", "").lower()
-              build = item.get("build", "")
+              # Normal documented format: each build is an object.
+              if isinstance(item, dict):
+                  title = str(item.get("title", ""))
+                  build = str(item.get("build", ""))
+                  arch = str(item.get("arch", ""))
+                  uuid = str(item.get("uuid", ""))
+                  created = int(item.get("created") or 0)
+
+              # If the API supplies UUID strings, retrieve their metadata.
+              elif isinstance(item, str):
+                  if not re.fullmatch(
+                      r"[0-9a-fA-F-]{36}(?:_rev\.\d+)?",
+                      item
+                  ):
+                      continue
+
+                  info_url = BASE + "updateinfo.php?" + urllib.parse.urlencode({
+                      "id": item
+                  })
+
+                  try:
+                      info_data = get_json(info_url)
+                      info = info_data.get("response", {})
+                  except Exception:
+                      continue
+
+                  if not isinstance(info, dict):
+                      continue
+
+                  title = str(
+                      info.get("title")
+                      or info.get("updateTitle")
+                      or info.get("updateName")
+                      or ""
+                  )
+                  build = str(
+                      info.get("build")
+                      or info.get("foundBuild")
+                      or ""
+                  )
+                  arch = str(info.get("arch", ""))
+                  uuid = item
+                  created = int(info.get("created") or 0)
+
+              else:
+                  continue
 
               if (
-                  arch == "arm64"
-                  and "windows 11" in title
-                  and "24h2" in title
+                  uuid
+                  and arch.lower() in ("arm64", "aarch64")
                   and build.startswith("26100.")
+                  and "windows 11" in title.lower()
               ):
-                  candidates.append(item)
+                  candidates.append({
+                      "title": title,
+                      "build": build,
+                      "arch": arch,
+                      "uuid": uuid,
+                      "created": created
+                  })
 
           if not candidates:
               raise SystemExit(
-                  "No Windows 11 24H2 ARM64 builds found in UUP Dump."
+                  "No Windows 11 26100 ARM64 builds were found. "
+                  "UUP Dump returned "
+                  + str(len(builds))
+                  + " entries."
               )
 
           candidates.sort(
-              key=lambda item: tuple(
-                  int(part) for part in item["build"].split(".")
+              key=lambda item: (
+                  tuple(int(x) for x in item["build"].split(".")),
+                  item["created"]
               ),
               reverse=True
           )
 
           selected = candidates[0]
 
-          print("Selected:", selected["title"])
+          print("Selected Windows build:")
+          print("Title:", selected["title"])
           print("Build:", selected["build"])
           print("Architecture:", selected["arch"])
           print("Update ID:", selected["uuid"])
 
-          with open("uup-id.txt", "w") as f:
-              f.write(selected["uuid"])
+          with open("uup-id.txt", "w") as file:
+              file.write(selected["uuid"])
           PY
 
           UUP_ID="$(cat uup-id.txt)"
 
-          # Request the actual UUP Dump download/conversion ZIP.
+          # Request the UUP Dump conversion package.
           PACKAGE_URL="https://uupdump.net/get.php?id=${UUP_ID}&pack=en-us&edition=professional&aria2=2"
 
-          echo "Downloading UUP package for $UUP_ID..."
+          echo "Downloading UUP package: $UUP_ID"
 
-          curl -fL --retry 3 \
+          curl -fL \
+            --retry 3 \
+            --retry-delay 5 \
             -A "Mozilla/5.0" \
             "$PACKAGE_URL" \
             -o uup-download.zip
 
-          # Fail clearly if UUP Dump returns HTML or an error page.
+          # Confirm that the server returned an actual ZIP.
           if ! unzip -tq uup-download.zip; then
-            echo "ERROR: UUP Dump did not return a valid ZIP."
-            echo "Response details:"
+            echo "::error::UUP Dump did not return a valid ZIP archive."
+            echo "Downloaded file information:"
             file uup-download.zip
+            echo "First 1000 bytes:"
             head -c 1000 uup-download.zip || true
             exit 1
           fi
@@ -169,14 +263,15 @@ jobs:
           DOWNLOAD_SCRIPT="$UUP_DIR/uup_download_macos.sh"
 
           if [ ! -f "$DOWNLOAD_SCRIPT" ]; then
-            echo "ERROR: macOS UUP download script was not found."
+            echo "::error::The macOS UUP download script is missing."
             find "$UUP_DIR" -maxdepth 3 -type f
             exit 1
           fi
 
           chmod +x "$DOWNLOAD_SCRIPT"
 
-          echo "Downloading Windows UUP files and converting to ISO..."
+          echo "Downloading UUP files and converting to ISO..."
+
           cd "$UUP_DIR"
           bash ./uup_download_macos.sh
           cd "$GITHUB_WORKSPACE"
@@ -184,12 +279,12 @@ jobs:
           ISO="$(find "$UUP_DIR" -type f -iname '*.iso' -print -quit)"
 
           if [ -z "$ISO" ]; then
-            echo "ERROR: UUP conversion did not produce an ISO."
+            echo "::error::UUP conversion did not produce an ISO."
             find "$UUP_DIR" -maxdepth 3 -type f
             exit 1
           fi
 
-          echo "Found ISO: $ISO"
+          echo "ISO found: $ISO"
 
           mkdir -p "$ISO_MOUNT" "$ISO_STAGE"
 
@@ -201,8 +296,31 @@ jobs:
 
           trap 'hdiutil detach "$ISO_MOUNT" -quiet || true' EXIT
 
+          # Find the Windows installation image.
+          INSTALL_IMAGE=""
+
+          if [ -f "$ISO_MOUNT/sources/install.esd" ]; then
+            INSTALL_IMAGE="$ISO_MOUNT/sources/install.esd"
+          elif [ -f "$ISO_MOUNT/sources/install.wim" ]; then
+            INSTALL_IMAGE="$ISO_MOUNT/sources/install.wim"
+          else
+            echo "::error::Neither install.esd nor install.wim exists in the ISO."
+            ls -lah "$ISO_MOUNT/sources"
+            exit 1
+          fi
+
+          if [ ! -f "$ISO_MOUNT/sources/boot.wim" ]; then
+            echo "::error::boot.wim is missing from the ISO."
+            exit 1
+          fi
+
+          # Remove any previous output.
+          rm -f "$ESD_OUT"
+
+          # Copy the setup files, excluding the large WIM images.
           rsync -a \
             --exclude="/sources/install.esd" \
+            --exclude="/sources/install.wim" \
             --exclude="/sources/boot.wim" \
             "$ISO_MOUNT/" \
             "$ISO_STAGE/"
@@ -223,10 +341,13 @@ jobs:
             --compress=LZX \
             --boot
 
-          # Index 6: Windows Pro, matching the existing provisioner.
+          # Put Windows Pro at index 6 to match the existing provisioner.
+          # The selected UUP package is for the Professional edition.
           for INDEX in 3 4 5 6; do
+            echo "Creating ESD index $INDEX..."
+
             wimlib-imagex export \
-              "$ISO_MOUNT/sources/install.esd" \
+              "$INSTALL_IMAGE" \
               1 \
               "$ESD_OUT" \
               "Windows 11 Pro" \
@@ -244,7 +365,6 @@ jobs:
 
           echo "Generated ESD:"
           ls -lh "$ESD_OUT"
-
 
       - name: Build VM engine
         run: |
