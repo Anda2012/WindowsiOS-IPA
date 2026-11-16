@@ -1,0 +1,72 @@
+
+name: Build unsigned iOS IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Install dependencies
+        run: |
+          brew install xcodegen meson ninja pkg-config python@3.12
+
+      - name: Build iOS dependencies
+        run: |
+          ./scripts/build_ios_deps.sh
+
+      - name: Build native iOS library
+        run: |
+          make -j8 ios-lib
+
+      - name: Generate Xcode project
+        run: |
+          xcodegen generate --spec ios/project.yml
+
+      - name: Build unsigned iOS app
+        run: |
+          xcodebuild \
+            -project ios/WindowsiOS.xcodeproj \
+            -scheme WindowsiOS \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package IPA
+        run: |
+          APP="build/DerivedData/Build/Products/Release-iphoneos/WindowsiOS.app"
+
+          test -d "$APP"
+
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          ditto "$APP" "$RUNNER_TEMP/ipa/Payload/WindowsiOS.app"
+
+          cd "$RUNNER_TEMP/ipa"
+          zip -qry "$GITHUB_WORKSPACE/WindowsiOS-unsigned.ipa" Payload
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: WindowsiOS-unsigned-IPA
+          path: WindowsiOS-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
