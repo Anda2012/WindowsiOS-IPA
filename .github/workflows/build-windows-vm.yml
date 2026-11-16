@@ -77,12 +77,12 @@ jobs:
             -ladvapi32 \
             -o build/opt_hive_arm64.exe
 
+      
       - name: Download and convert Windows 11 ARM64
         shell: bash
         run: |
           set -euo pipefail
 
-          UUP_ID="11a79ad8-a26e-4deb-964e-f65231c110be"
           UUP_DIR="$PWD/uup-download"
           ISO_MOUNT="$PWD/work/iso"
           ISO_STAGE="$PWD/work/iso-stage"
@@ -90,25 +90,102 @@ jobs:
 
           mkdir -p "$UUP_DIR" work/downloads work
 
-          echo "Downloading Windows 11 24H2 ARM64 Pro UUP package..."
+          # Find the newest Windows 11 24H2 ARM64 build.
+          python3 - <<'PY'
+          import json
+          import urllib.request
+
+          url = "https://api.uupdump.net/listid.php?search=26100&sortByDate=1"
+          req = urllib.request.Request(
+              url,
+              headers={"User-Agent": "Windows-VM-GitHub-Actions"}
+          )
+
+          with urllib.request.urlopen(req, timeout=60) as response:
+              data = json.load(response)
+
+          builds = data.get("response", {}).get("builds", [])
+
+          candidates = []
+          for item in builds:
+              title = item.get("title", "").lower()
+              arch = item.get("arch", "").lower()
+              build = item.get("build", "")
+
+              if (
+                  arch == "arm64"
+                  and "windows 11" in title
+                  and "24h2" in title
+                  and build.startswith("26100.")
+              ):
+                  candidates.append(item)
+
+          if not candidates:
+              raise SystemExit(
+                  "No Windows 11 24H2 ARM64 builds found in UUP Dump."
+              )
+
+          candidates.sort(
+              key=lambda item: tuple(
+                  int(part) for part in item["build"].split(".")
+              ),
+              reverse=True
+          )
+
+          selected = candidates[0]
+
+          print("Selected:", selected["title"])
+          print("Build:", selected["build"])
+          print("Architecture:", selected["arch"])
+          print("Update ID:", selected["uuid"])
+
+          with open("uup-id.txt", "w") as f:
+              f.write(selected["uuid"])
+          PY
+
+          UUP_ID="$(cat uup-id.txt)"
+
+          # Request the actual UUP Dump download/conversion ZIP.
+          PACKAGE_URL="https://uupdump.net/get.php?id=${UUP_ID}&pack=en-us&edition=professional&aria2=2"
+
+          echo "Downloading UUP package for $UUP_ID..."
 
           curl -fL --retry 3 \
-            "https://uupdump.net/get.php?id=${UUP_ID}&pack=en-us&edition=professional&aria2=2" \
+            -A "Mozilla/5.0" \
+            "$PACKAGE_URL" \
             -o uup-download.zip
+
+          # Fail clearly if UUP Dump returns HTML or an error page.
+          if ! unzip -tq uup-download.zip; then
+            echo "ERROR: UUP Dump did not return a valid ZIP."
+            echo "Response details:"
+            file uup-download.zip
+            head -c 1000 uup-download.zip || true
+            exit 1
+          fi
 
           unzip -q uup-download.zip -d "$UUP_DIR"
 
-          echo "Running UUP download and conversion..."
+          DOWNLOAD_SCRIPT="$UUP_DIR/uup_download_macos.sh"
 
+          if [ ! -f "$DOWNLOAD_SCRIPT" ]; then
+            echo "ERROR: macOS UUP download script was not found."
+            find "$UUP_DIR" -maxdepth 3 -type f
+            exit 1
+          fi
+
+          chmod +x "$DOWNLOAD_SCRIPT"
+
+          echo "Downloading Windows UUP files and converting to ISO..."
           cd "$UUP_DIR"
-          chmod +x uup_download_macos.sh
           bash ./uup_download_macos.sh
           cd "$GITHUB_WORKSPACE"
 
           ISO="$(find "$UUP_DIR" -type f -iname '*.iso' -print -quit)"
 
           if [ -z "$ISO" ]; then
-            echo "ERROR: UUP converter did not produce an ISO."
+            echo "ERROR: UUP conversion did not produce an ISO."
+            find "$UUP_DIR" -maxdepth 3 -type f
             exit 1
           fi
 
@@ -124,22 +201,20 @@ jobs:
 
           trap 'hdiutil detach "$ISO_MOUNT" -quiet || true' EXIT
 
-          echo "Creating combined ESD..."
-
           rsync -a \
             --exclude="/sources/install.esd" \
             --exclude="/sources/boot.wim" \
             "$ISO_MOUNT/" \
             "$ISO_STAGE/"
 
-          # Index 1: Windows setup files
+          # Index 1: Windows setup files.
           wimlib-imagex capture \
             "$ISO_STAGE" \
             "$ESD_OUT" \
             "Windows Setup Files" \
             --compress=LZX
 
-          # Index 2: Windows PE setup image
+          # Index 2: Windows Setup PE.
           wimlib-imagex export \
             "$ISO_MOUNT/sources/boot.wim" \
             2 \
@@ -148,11 +223,8 @@ jobs:
             --compress=LZX \
             --boot
 
-          # Indexes 3-6: Windows 11 Pro image.
-          # Index 6 is retained because the existing provisioner expects it.
+          # Index 6: Windows Pro, matching the existing provisioner.
           for INDEX in 3 4 5 6; do
-            echo "Adding Windows Pro image as index $INDEX..."
-
             wimlib-imagex export \
               "$ISO_MOUNT/sources/install.esd" \
               1 \
@@ -161,17 +233,18 @@ jobs:
               --compress=LZX
           done
 
-          echo "Checking combined ESD..."
+          echo "Checking generated ESD..."
           wimlib-imagex info "$ESD_OUT"
 
           hdiutil detach "$ISO_MOUNT" -quiet
           trap - EXIT
 
-          echo "Removing temporary UUP and ISO files..."
           rm -rf "$UUP_DIR" uup-download.zip "$ISO" "$ISO_STAGE"
+          rm -f uup-id.txt
 
-          echo "Final ESD:"
+          echo "Generated ESD:"
           ls -lh "$ESD_OUT"
+
 
       - name: Build VM engine
         run: |
