@@ -377,9 +377,16 @@ jobs:
           PY
 
       - name: Build VM engine
+        shell: bash
         run: |
           set -euo pipefail
-          make -j2 all
+
+          APPLE_CLANG="$(xcrun --find clang)"
+          echo "Using Apple Clang: $APPLE_CLANG"
+          "$APPLE_CLANG" --version
+
+          make CC="$APPLE_CLANG" -j2 all
+
           ./build/hvsparse --help || true
 
       - name: Provision Windows
