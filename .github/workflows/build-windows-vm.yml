@@ -38,38 +38,74 @@ jobs:
           echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
 
       - name: Download LLVM-MinGW
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+
           python3 - <<'PY'
           import json
+          import os
+          import urllib.error
           import urllib.request
 
+          token = os.environ.get("GH_TOKEN")
+          if not token:
+              raise SystemExit("GitHub Actions token is missing.")
+
           url = "https://api.github.com/repos/mstorsjo/llvm-mingw/releases/latest"
+
           req = urllib.request.Request(
               url,
-              headers={"User-Agent": "GitHub-Actions"}
+              headers={
+                  "User-Agent": "GitHub-Actions",
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {token}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              }
           )
 
-          with urllib.request.urlopen(req, timeout=60) as response:
-              data = json.load(response)
+          try:
+              with urllib.request.urlopen(req, timeout=60) as response:
+                  data = json.load(response)
+          except urllib.error.HTTPError as error:
+              body = error.read().decode("utf-8", errors="replace")
+              print("GitHub API status:", error.code)
+              print("GitHub API response:", body[:2000])
+              raise SystemExit("Failed to retrieve LLVM-MinGW release metadata.")
 
           asset = next(
               (
-                  a for a in data.get("assets", [])
-                  if "macos-universal" in a["name"]
-                  and a["name"].endswith(".tar.xz")
+                  item for item in data.get("assets", [])
+                  if "macos-universal" in item["name"]
+                  and item["name"].endswith(".tar.xz")
               ),
-              None
+              None,
           )
 
           if asset is None:
-              raise SystemExit("Could not find macOS LLVM-MinGW.")
+              print("Available release assets:")
+              for item in data.get("assets", []):
+                  print(" -", item["name"])
+              raise SystemExit("Could not find the macOS universal LLVM-MinGW archive.")
 
+          print("Release:", data.get("tag_name"))
           print("Downloading:", asset["name"])
 
-          urllib.request.urlretrieve(
+          download_request = urllib.request.Request(
               asset["browser_download_url"],
-              "llvm-mingw.tar.xz"
+              headers={"User-Agent": "GitHub-Actions"},
           )
+
+          with urllib.request.urlopen(download_request, timeout=300) as response:
+              with open("llvm-mingw.tar.xz", "wb") as output:
+                  while True:
+                      chunk = response.read(1024 * 1024)
+                      if not chunk:
+                          break
+                      output.write(chunk)
+
+          print("LLVM-MinGW download completed.")
           PY
 
           mkdir -p llvm-mingw
@@ -78,6 +114,7 @@ jobs:
 
       - name: Prepare Windows optimizer
         run: |
+          set -euo pipefail
           mkdir -p build
 
           aarch64-w64-mingw32-clang \
@@ -306,19 +343,23 @@ jobs:
 
       - name: Build VM engine
         run: |
+          set -euo pipefail
           make -j2 all
           ./build/hvsparse --help || true
 
       - name: Provision Windows
         run: |
+          set -euo pipefail
           /opt/homebrew/bin/python3 scripts/provision_windows_arm64.py
 
       - name: Optimize Windows
         run: |
+          set -euo pipefail
           /opt/homebrew/bin/python3 scripts/optimize_windows_lite.py
 
       - name: Pack VM image
         run: |
+          set -euo pipefail
           ./build/hvsparse pack \
             work/windows11_lite.img \
             work/windows11.hvsparse
