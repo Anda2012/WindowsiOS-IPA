@@ -281,6 +281,7 @@ jobs:
           rm -f "$ESD_OUT"
 
           rsync -a \
+            --exclude="/boot.catalog" \
             --exclude="/sources/install.esd" \
             --exclude="/sources/install.wim" \
             --exclude="/sources/boot.wim" \
