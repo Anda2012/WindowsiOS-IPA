@@ -381,11 +381,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          APPLE_CLANG="$(xcrun --find clang)"
+          APPLE_CLANG="$(xcrun --sdk macosx --find clang)"
+          MACOS_SDK="$(xcrun --sdk macosx --show-sdk-path)"
+
           echo "Using Apple Clang: $APPLE_CLANG"
+          echo "Using macOS SDK: $MACOS_SDK"
+
+          if [ ! -f "$MACOS_SDK/usr/include/TargetConditionals.h" ]; then
+            echo "::error::TargetConditionals.h was not found in the macOS SDK."
+            find "$MACOS_SDK" -name TargetConditionals.h -print
+            exit 1
+          fi
+
           "$APPLE_CLANG" --version
 
-          make CC="$APPLE_CLANG" -j2 all
+          make \
+            CC="$APPLE_CLANG -isysroot $MACOS_SDK" \
+            CFLAGS="-std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices -isysroot $MACOS_SDK" \
+            OBJCFLAGS="-fobjc-arc -Wall -Wextra -O2 -g -Icore -Ihost -Idevices -isysroot $MACOS_SDK" \
+            -j2 all
 
           ./build/hvsparse --help || true
 
