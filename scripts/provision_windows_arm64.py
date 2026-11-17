@@ -1,3 +1,4 @@
+
 #!/opt/homebrew/bin/python3
 """
 Provision a ready-to-boot Windows 11 Pro ARM64 (24H2, Build 26100) GPT NVMe disk image
@@ -185,77 +186,157 @@ def make_custom_boot_wim(dest_boot_wim: Path):
     dest_boot_wim.parent.mkdir(parents=True, exist_ok=True)
     if dest_boot_wim.exists():
         dest_boot_wim.unlink()
-    run(["/opt/homebrew/bin/wimlib-imagex", "export", ESD, "2", dest_boot_wim, "--compress=LZX", "--boot"])
+
+    run([
+        "/opt/homebrew/bin/wimlib-imagex",
+        "export",
+        ESD,
+        "2",
+        dest_boot_wim,
+        "--compress=LZX",
+        "--boot",
+    ])
+
     snet = WORK / "startnet.cmd"
     unat = WORK / "unattend_panther.xml"
+
     snet.write_text(STARTNET_CMD.replace("\n", "\r\n"), encoding="utf-8")
     unat.write_text(PANTHER_UNATTEND_XML.replace("\n", "\r\n"), encoding="utf-8")
+
     cmds = (
         f"add '{snet}' '/Windows/System32/startnet.cmd'\n"
         f"add '{unat}' '/Windows/System32/unattend_panther.xml'\n"
     ).encode("utf-8")
-    run(["/opt/homebrew/bin/wimlib-imagex", "update", dest_boot_wim, "1"], input=cmds)
+
+    run([
+        "/opt/homebrew/bin/wimlib-imagex",
+        "update",
+        dest_boot_wim,
+        "1",
+    ], input=cmds)
+
     snet.unlink(missing_ok=True)
     unat.unlink(missing_ok=True)
 
 
 def build_two_partition_installer():
     marker = WORK / ".installer_exfat_v4"
+
     if INST_IMG.exists() and marker.exists():
-        print(f"[skip] {INST_IMG} already built ({INST_IMG.stat().st_size} bytes)", flush=True)
+        print(
+            f"[skip] {INST_IMG} already built "
+            f"({INST_IMG.stat().st_size} bytes)",
+            flush=True,
+        )
         return
 
-    print("Building 2-partition GPT installer (FAT32 WinPE + ExFAT unsplit install.wim)...", flush=True)
+    print(
+        "Building 2-partition GPT installer "
+        "(FAT32 WinPE + ExFAT unsplit install.wim)...",
+        flush=True,
+    )
+
     INST_IMG.unlink(missing_ok=True)
+
     with open(INST_IMG, "wb") as f:
         f.truncate(6400 * 1024 * 1024)
 
-    out = subprocess.check_output(["hdiutil", "attach", "-imagekey", "diskimage-class=CRawDiskImage", "-nomount", str(INST_IMG)], text=True)
+    out = subprocess.check_output([
+        "hdiutil",
+        "attach",
+        "-imagekey",
+        "diskimage-class=CRawDiskImage",
+        "-nomount",
+        str(INST_IMG),
+    ], text=True)
+
     whole_disk = out.strip().splitlines()[0].split()[0]
     print(f"Attached raw installer disk as {whole_disk}", flush=True)
+
     try:
         run([
-            "diskutil", "partitionDisk", whole_disk, "GPT",
-            "MS-DOS", "WINPE", "900M",
-            "ExFAT", "WINWIM", "R",
+            "diskutil",
+            "partitionDisk",
+            whole_disk,
+            "GPT",
+            "MS-DOS",
+            "WINPE",
+            "900M",
+            "ExFAT",
+            "WINWIM",
+            "R",
         ])
+
         pe_root = Path("/Volumes/WINPE")
         wim_root = Path("/Volumes/WINWIM")
-        if not pe_root.exists() or not wim_root.exists():
-            raise RuntimeError(f"Expected /Volumes/WINPE and /Volumes/WINWIM after partitionDisk on {whole_disk}")
 
-        # Extract small UEFI boot files (Index 1, skipping install.esd/boot.wim) into FAT32 WINPE
+        if not pe_root.exists() or not wim_root.exists():
+            raise RuntimeError(
+                f"Expected /Volumes/WINPE and /Volumes/WINWIM "
+                f"after partitionDisk on {whole_disk}"
+            )
+
         stage_pe = WORK / "stage_pe_v4"
         shutil.rmtree(stage_pe, ignore_errors=True)
         stage_pe.mkdir(parents=True, exist_ok=True)
-        run(["/opt/homebrew/bin/wimlib-imagex", "extract", ESD, "1", "/efi", "/boot", "/bootmgr.efi", f"--dest-dir={stage_pe}"])
+
+        run([
+            "/opt/homebrew/bin/wimlib-imagex",
+            "extract",
+            ESD,
+            "1",
+            "/efi",
+            "/boot",
+            "/bootmgr.efi",
+            f"--dest-dir={stage_pe}",
+        ])
+
         for item in stage_pe.iterdir():
             dest = pe_root / item.name
+
             if item.is_dir():
                 shutil.copytree(item, dest, dirs_exist_ok=True)
             else:
                 shutil.copy2(item, dest)
+
         shutil.rmtree(stage_pe, ignore_errors=True)
 
         make_custom_boot_wim(pe_root / "sources" / "boot.wim")
 
-        # Export unsplit Windows 11 Pro (Index 6) directly onto ExFAT WINWIM!
         (wim_root / "sources").mkdir(parents=True, exist_ok=True)
-        run(["/opt/homebrew/bin/wimlib-imagex", "export", ESD, "6", wim_root / "sources" / "install.wim", "--compress=LZX"])
+
+        run([
+            "/opt/homebrew/bin/wimlib-imagex",
+            "export",
+            ESD,
+            "6",
+            wim_root / "sources" / "install.wim",
+            "--compress=LZX",
+        ])
+
     finally:
-        subprocess.run(["hdiutil", "detach", whole_disk], check=False)
+        subprocess.run(
+            ["hdiutil", "detach", whole_disk],
+            check=False,
+        )
 
     marker.write_text("ok\n")
-    # Clean old installer.dmg to save space inside work/
+
     old_dmg = WORK / "installer.dmg"
     if old_dmg.exists():
         old_dmg.unlink()
 
 
-def run_winvm_phase(phase_name: str, extra_args: list[str], screen_png: Path, max_minutes: int):
+def run_winvm_phase(
+    phase_name: str,
+    extra_args: list[str],
+    screen_png: Path,
+):
     cmd_file = WORK / f"prov_{phase_name}.cmds"
     log_file = WORK / f"prov_{phase_name}.log"
+
     cmd_file.write_text("")
+
     cmd = [
         str(WINVM),
         "--headless",
@@ -269,53 +350,112 @@ def run_winvm_phase(phase_name: str, extra_args: list[str], screen_png: Path, ma
         "--screenshot", str(screen_png),
         *extra_args,
     ]
-    print(f"\n=== Starting {phase_name}: {' '.join(cmd)} ===", flush=True)
+
+    print(
+        f"\n=== Starting {phase_name}: {' '.join(cmd)} ===",
+        flush=True,
+    )
+
     t0 = time.time()
+
     with open(log_file, "wb") as lf:
-        proc = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(
+            cmd,
+            stdout=lf,
+            stderr=subprocess.STDOUT,
+        )
+
         next_shot = 15
+
+        # Intentionally no phase timeout.
+        # Keep the VM running until it exits or shuts down itself.
         while proc.poll() is None:
             elapsed = time.time() - t0
+
             if elapsed >= next_shot:
                 with open(cmd_file, "a", encoding="utf-8") as cf:
                     cf.write(f"screenshot {screen_png}\n")
-                st = subprocess.check_output(["du", "-sh", str(WIN_IMG)], text=True).split()[0]
-                print(f"[{phase_name} +{int(elapsed)}s] running (windows11.img={st}, screen={screen_png.name})", flush=True)
+
+                st = subprocess.check_output(
+                    ["du", "-sh", str(WIN_IMG)],
+                    text=True,
+                ).split()[0]
+
+                print(
+                    f"[{phase_name} +{int(elapsed)}s] running "
+                    f"(windows11.img={st}, screen={screen_png.name})",
+                    flush=True,
+                )
+
                 next_shot += 20
-            if elapsed > max_minutes * 60:
-                proc.terminate()
-                raise TimeoutError(f"{phase_name} exceeded {max_minutes} minutes")
+
             time.sleep(2)
+
         if proc.returncode != 0:
-            raise RuntimeError(f"{phase_name} exited with code {proc.returncode}; check {log_file}")
-    print(f"=== {phase_name} finished cleanly in {int(time.time() - t0)}s! ===", flush=True)
+            raise RuntimeError(
+                f"{phase_name} exited with code {proc.returncode}; "
+                f"check {log_file}"
+            )
+
+    print(
+        f"=== {phase_name} finished cleanly in "
+        f"{int(time.time() - t0)}s! ===",
+        flush=True,
+    )
 
 
 def main():
     WORK.mkdir(parents=True, exist_ok=True)
+
     if not ESD.exists():
         sys.exit(f"Missing {ESD}")
+
     if not WINVM.exists():
         sys.exit(f"Missing {WINVM}")
 
     build_two_partition_installer()
 
-    shutil.copyfile("/opt/homebrew/share/qemu/edk2-aarch64-code.fd", CODE_FD)
-    shutil.copyfile("/opt/homebrew/share/qemu/edk2-arm-vars.fd", VARS_FD)
+    shutil.copyfile(
+        "/opt/homebrew/share/qemu/edk2-aarch64-code.fd",
+        CODE_FD,
+    )
+
+    shutil.copyfile(
+        "/opt/homebrew/share/qemu/edk2-arm-vars.fd",
+        VARS_FD,
+    )
 
     if WIN_IMG.exists():
         WIN_IMG.unlink()
+
     with open(WIN_IMG, "wb") as f:
         f.truncate(32 * 1024 * 1024 * 1024)
 
-    # Phase 1: Boot WinPE -> partition -> DISM unsplit install.wim -> offline reg + unattend -> bcdboot -> wpeutil shutdown
-    run_winvm_phase("phase1_dism", ["--disk1", str(INST_IMG)], WORK / "prov_phase1.png", max_minutes=40)
+    # Phase 1: Boot WinPE -> partition -> DISM unsplit install.wim
+    # -> offline registry + unattend -> bcdboot -> wpeutil shutdown
+    run_winvm_phase(
+        "phase1_dism",
+        ["--disk1", str(INST_IMG)],
+        WORK / "prov_phase1.png",
+    )
+
     shutil.copyfile(VARS_FD, WORK / "vars_post_dism.fd")
 
-    # Phase 2: Boot installed Windows 11 Pro ARM64 -> specialize -> reboot -> oobeSystem -> AutoLogon Ammaar -> clean shutdown
-    run_winvm_phase("phase2_oobe", [], WORK / "prov_phase2.png", max_minutes=60)
+    # Phase 2: Boot installed Windows 11 Pro ARM64
+    # -> specialize -> reboot -> oobeSystem -> AutoLogon -> clean shutdown
+    run_winvm_phase(
+        "phase2_oobe",
+        [],
+        WORK / "prov_phase2.png",
+    )
+
     shutil.copyfile(VARS_FD, WORK / "vars_clean.fd")
-    print("SUCCESS: Windows 11 Pro ARM64 provisioned and cleanly shut down!", flush=True)
+
+    print(
+        "SUCCESS: Windows 11 Pro ARM64 provisioned "
+        "and cleanly shut down!",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
