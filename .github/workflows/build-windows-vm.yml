@@ -137,7 +137,8 @@ jobs:
           echo "UUP ID: $UUP_ID"
 
           curl -fL \
-            --retry 3 \
+            --retry 5 \
+            --retry-all-errors \
             --retry-delay 5 \
             --connect-timeout 30 \
             -A "Mozilla/5.0" \
@@ -156,19 +157,52 @@ jobs:
 
           echo "Downloading Windows UUP files..."
 
-          aria2c \
-            --no-conf \
-            --console-log-level=warn \
-            --log-level=info \
-            --max-tries=5 \
-            --retry-wait=10 \
-            --connect-timeout=30 \
-            -x8 \
-            -s8 \
-            -j4 \
-            -c \
-            -d "$PWD/uup-download/UUPs" \
-            -i "$PWD/uup-download/uup-files.txt"
+          DOWNLOAD_SUCCESS=0
+
+          for ATTEMPT in 1 2 3; do
+            echo ""
+            echo "=========================================="
+            echo "UUP download pass $ATTEMPT of 3"
+            echo "=========================================="
+
+            if aria2c \
+              --no-conf \
+              --console-log-level=warn \
+              --log-level=info \
+              --max-tries=10 \
+              --retry-wait=15 \
+              --timeout=90 \
+              --connect-timeout=60 \
+              --auto-file-renaming=false \
+              --allow-overwrite=false \
+              -x4 \
+              -s4 \
+              -j2 \
+              -c \
+              -d "$PWD/uup-download/UUPs" \
+              -i "$PWD/uup-download/uup-files.txt"; then
+
+              DOWNLOAD_SUCCESS=1
+              echo "All UUP downloads completed."
+              break
+            fi
+
+            echo "::warning::UUP download pass $ATTEMPT failed."
+
+            if [ "$ATTEMPT" -lt 3 ]; then
+              echo "Waiting 20 seconds before resuming incomplete downloads..."
+              sleep 20
+            fi
+          done
+
+          if [ "$DOWNLOAD_SUCCESS" -ne 1 ]; then
+            echo "::error::UUP downloads still have failures after 3 passes."
+            echo "Files downloaded so far:"
+            du -sh uup-download/UUPs
+            echo "Incomplete download files:"
+            find uup-download/UUPs -name '*.aria2' -print
+            exit 1
+          fi
 
           echo "UUP download completed."
           du -sh uup-download/UUPs
