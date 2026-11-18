@@ -359,21 +359,51 @@ jobs:
 
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           path = Path("scripts/provision_windows_arm64.py")
           content = path.read_text()
 
-          old = 'ESD, "6", wim_root / "sources" / "install.wim"'
-          new = 'ESD, "3", wim_root / "sources" / "install.wim"'
+          pattern = re.compile(
+              r'(ESD,\s*)"6"(\s*,\s*'
+              r'wim_root\s*/\s*"sources"\s*/\s*"install\.wim")'
+          )
 
-          if old not in content:
-              raise SystemExit(
-                  "Could not find the expected Windows Pro export command."
+          updated, count = pattern.subn(
+              lambda match: match.group(1) + '"3"' + match.group(2),
+              content,
+              count=1,
+          )
+
+          if count == 0:
+              already_correct = re.search(
+                  r'ESD,\s*"3"\s*,\s*'
+                  r'wim_root\s*/\s*"sources"\s*/\s*"install\.wim"',
+                  content,
               )
 
-          path.write_text(content.replace(old, new, 1))
+              if already_correct:
+                  print("Provisioner already uses ESD index 3.")
+              else:
+                  print("Could not locate the Windows Pro export command.")
+                  for number, line in enumerate(content.splitlines(), 1):
+                      if "wim_root" in line or "ESD," in line:
+                          print(f"{number}: {line}")
+                  raise SystemExit(1)
+          else:
+              path.write_text(updated)
+              print("Provisioner successfully updated to ESD index 3.")
 
-          print("Provisioner updated to use ESD index 3.")
+          final_content = path.read_text()
+
+          if not re.search(
+              r'ESD,\s*"3"\s*,\s*'
+              r'wim_root\s*/\s*"sources"\s*/\s*"install\.wim"',
+              final_content,
+          ):
+              raise SystemExit("Verification failed: ESD index is not 3.")
+
+          print("ESD index verification passed.")
           PY
 
       - name: Build VM engine
